@@ -583,7 +583,7 @@ fn format_title(_config: &Config, title: &str) -> String {
             first &= word.colon;
         } else {
             result.push_str(word.text);
-            first = false;
+            first &= word.colon;
         }
         // close any opened code span
         if word.is_code && words.get(w + 1).map_or(true, |n| !n.is_code) {
