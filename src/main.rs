@@ -17,7 +17,7 @@ fn read_config() -> Result<Config, Box<dyn Error>> {
     let config = fs::read_to_string("cache/config")?;
     Ok(config
         .split('\n')
-        .flat_map(|s| s.split_once("="))
+        .flat_map(|s| s.trim_end().split_once("="))
         .map(|(k, v)| (k.into(), v.into()))
         .collect())
 }
@@ -264,6 +264,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .collect::<Vec<_>>();
             println!("{}\n* {}", branches.join(", "), current);
         }
+        "editor" => {
+            let conf = read_config()?;
+            let editor = conf
+                .get("editor")
+                .ok_or(Cow::Borrowed("needs `editor=<path>` in config"))?;
+            command(editor, &[], "")?;
+        }
+        "browser" => {
+            let conf = read_config()?;
+            let firefox = conf
+                .get("firefox")
+                .ok_or(Cow::Borrowed("needs `firefox=<path>` in config"))?;
+            //command(firefox, &[], "")?;
+            println!("{firefox:?}");
+        }
         "start" => {
             println!("start");
             let conf = read_config()?;
@@ -277,7 +292,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             command("git", &["pull"], TWIR)?;
             let file_path = file_path()?;
             let contents = std::fs::read_to_string(&file_path)?;
-            //let number = get_number(&contents)?;
+            if !(contents.contains("<!-- COTW goes here -->")
+                && contents.contains("<!-- QOTW goes here -->")
+                && contents.contains("<!-- Rust updates go here -->"))
+            {
+                println!("error: setup not done yet. Try again later.");
+                return Ok(());
+            }
             command(
                 firefox,
                 &[
@@ -360,6 +381,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     _ => {}
                 }
                 if err > 0 {
+                    if err == 1 {
+                        panic!("There was 1 error");
+                    }
                     panic!("There were {} errors", err);
                 }
             }
@@ -378,7 +402,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &["checkout", "-b", &format!("twir-{}", number)],
                 TWIR,
             )?;
-            command("git", &["add", "draft"], TWIR)?;
+            command(
+                "git",
+                &[
+                    "add",
+                    &format!("draft/{}", file_path.file_name().unwrap().to_string_lossy()),
+                ],
+                TWIR,
+            )?;
             command("git", &["commit", "-m", "C/QotW and notable changes"], TWIR)?;
             command("git", &["push", "llogiq"], TWIR)?;
             // open the PR view
@@ -443,7 +474,7 @@ fn check_title(title: &str) -> usize {
         if c == '`' {
             in_code = !in_code;
         } else if !in_code {
-            if !escape && ['[', ']', '_'].contains(&c) {
+            if !escape && ['<', '>', '[', ']', '_'].contains(&c) {
                 println!("unescaped `{}` in non-code title: {}", c, title);
                 return 1;
             }
@@ -461,63 +492,111 @@ fn check_title(title: &str) -> usize {
     }
 }
 
-fn format_title(_config: &Config, title: &str) -> String {
-    let mut result = String::new();
-    let mut first = true;
-    let mut in_code = false;
-    let mut added_code = false;
-    for word in title.split_whitespace().filter(|w| !w.is_empty()) {
-        let mut word = if word.starts_with("#[") {
-            word
+fn has_unescaped(mut haystack: &str, needle: &str) -> bool {
+    while let Some(pos) = haystack.find(needle) {
+        if haystack.as_bytes()[pos.saturating_sub(1)] == b'\\' {
+            haystack = &haystack[pos + needle.len()..];
         } else {
-            word.trim_start_matches('[').trim_end_matches(']')
-        };
-        in_code |= word.starts_with('`');
-        let has_code = word.contains("_") && !word.contains("\\_")
-            || word.contains("::")
-            || word.contains("#[")
-            || word.contains("(") && word.ends_with(")");
-        // close possibly opened code section
-        if !has_code && added_code {
-            result.push('`');
-            added_code = false;
-        }
-        if first {
-            // open a code section if needed
-            if has_code && !(added_code || in_code) {
-                result.push('`');
-                added_code = true;
-            }
-            if word.starts_with(char::is_uppercase) {
-                //TODO add a configurable list of uppercase words that shouldn't be lower-cased
-                let mut chars = word.chars();
-                let first_lower = chars.next().unwrap().to_lowercase();
-                let rest = chars.as_str();
-                if rest.starts_with(char::is_lowercase) {
-                    result.extend(first_lower);
-                    word = rest;
-                }
-            }
-        } else {
-            result.push(' ');
-            // open a code section if needed
-            if has_code && !(added_code || in_code) {
-                result.push('`');
-                added_code = true;
-            }
-        }
-        result.push_str(word);
-        in_code &= !word.ends_with("`");
-        if word.ends_with(":") {
-            result.push(' ');
-        } else {
-            first = false;
+            return true;
         }
     }
-    result.truncate(result.trim_end_matches(char::is_whitespace).len());
-    // close possibly opened code span
-    if added_code {
-        result.push('`');
+    false
+}
+
+#[derive(Debug)]
+struct Word<'t> {
+    text: &'t str,
+    is_code: bool,
+    colon: bool,
+}
+
+impl<'t> Word<'t> {
+    fn new(s: &'t str, in_code: bool) -> (Self, bool, bool) {
+        let (text, colon) = if let Some(t) = s.strip_suffix(':') {
+            (t, true)
+        } else {
+            (s, false)
+        };
+        let (text, out_code) = if let Some(t) = text.strip_suffix('`') {
+            (t, true)
+        } else {
+            (text, false)
+        };
+        let (text, colon) = if let Some(t) = text.strip_suffix(':') {
+            (t, true)
+        } else {
+            (text, colon)
+        };
+        let (text, into_code) = if let Some(t) = text.strip_prefix('`') {
+            (t, true)
+        } else {
+            (text, false)
+        };
+        let is_code = into_code ||
+            in_code
+            // snake case terms
+            || has_unescaped(text, "_")
+            // generics
+            || has_unescaped(text, "<")
+            // paths
+            || text.contains("::")
+            // attributes
+            || text.contains("#[")
+            // function calls, but not parenthesized texts
+            || text.contains("(") && text.ends_with(")") && !text.starts_with('(');
+        (
+            Word {
+                text,
+                is_code,
+                colon,
+            },
+            into_code,
+            out_code,
+        )
+    }
+}
+
+fn format_title(_config: &Config, title: &str) -> String {
+    let mut in_code = false;
+    let mut words = Vec::new();
+    for text in title.trim().split_whitespace() {
+        let (word, into_code, out_code) = Word::new(text, in_code);
+        in_code = (in_code | into_code) & !out_code;
+        words.push(word);
+    }
+    let mut first = true;
+    let mut result = String::new();
+    for w in 0..words.len() {
+        let word = &words[w];
+        if word.is_code && w.checked_sub(1).map_or(true, |i| !words[i].is_code) {
+            result.push('`');
+            result.push_str(word.text);
+            first = false;
+        } else if first
+            && word.text.starts_with(char::is_uppercase)
+            && word.text.chars().any(char::is_lowercase)
+        {
+            // lowercase initial title case
+            let mut c = word.text.chars();
+            result.extend(c.next().unwrap().to_lowercase());
+            result.push_str(c.as_str());
+            first &= word.colon;
+        } else {
+            result.push_str(word.text);
+            first = false;
+        }
+        // close any opened code span
+        if word.is_code && words.get(w + 1).map_or(true, |n| !n.is_code) {
+            result.push('`');
+        }
+        // add any given colon
+        if word.colon {
+            result.push(':');
+        }
+        // add whitespace between words
+        if w < words.len() - 1 {
+            result.push(' ');
+        }
     }
     result
 }
