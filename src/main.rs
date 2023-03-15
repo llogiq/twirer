@@ -167,10 +167,14 @@ fn filter(config: &Config) -> Result<Vec<String>, Box<dyn Error>> {
     let mut sorted_prs = Vec::new();
     let ignore_list = get_list(config, "ignore")?;
     let order = get_list(config, "order")?;
+    let code_words: HashSet<String> = get_list(config, "code_keywords")?
+        .into_iter()
+        .cloned()
+        .collect();
     for pr in BufReader::new(prs).lines() {
         let pr = pr?;
         let (title, href) = pr.rsplit_once("](").unwrap_or((&pr, ""));
-        let title = format_title(config, title.strip_prefix("* [").unwrap_or(title));
+        let title = format_title(code_words, title.strip_prefix("* [").unwrap_or(title));
         if previous.contains(href) {
             continue;
         }
@@ -511,7 +515,7 @@ struct Word<'t> {
 }
 
 impl<'t> Word<'t> {
-    fn new(s: &'t str, in_code: bool) -> (Self, bool, bool) {
+    fn new(s: &'t str, in_code: bool, code_words: &HashSet<String>) -> (Self, bool, bool) {
         let (text, colon) = if let Some(t) = s.strip_suffix(':') {
             (t, true)
         } else {
@@ -543,7 +547,8 @@ impl<'t> Word<'t> {
             // attributes
             || text.contains("#[")
             // function calls, but not parenthesized texts
-            || text.contains("(") && text.ends_with(")") && !text.starts_with('(');
+            || text.contains("(") && text.ends_with(")") && !text.starts_with('(')
+            || code_words.contains(text);
         (
             Word {
                 text,
@@ -556,11 +561,11 @@ impl<'t> Word<'t> {
     }
 }
 
-fn format_title(_config: &Config, title: &str) -> String {
+fn format_title(code_words: &HashSet<String>, title: &str) -> String {
     let mut in_code = false;
     let mut words = Vec::new();
     for text in title.trim().split_whitespace() {
-        let (word, into_code, out_code) = Word::new(text, in_code);
+        let (word, into_code, out_code) = Word::new(text, in_code, code_words);
         in_code = (in_code | into_code) & !out_code;
         words.push(word);
     }
