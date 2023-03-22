@@ -169,12 +169,12 @@ fn filter(config: &Config) -> Result<Vec<String>, Box<dyn Error>> {
     let order = get_list(config, "order")?;
     let code_words: HashSet<String> = get_list(config, "code_keywords")?
         .into_iter()
-        .cloned()
+        .map(ToOwned::to_owned)
         .collect();
     for pr in BufReader::new(prs).lines() {
         let pr = pr?;
         let (title, href) = pr.rsplit_once("](").unwrap_or((&pr, ""));
-        let title = format_title(code_words, title.strip_prefix("* [").unwrap_or(title));
+        let title = format_title(&code_words, title.strip_prefix("* [").unwrap_or(title));
         if previous.contains(href) {
             continue;
         }
@@ -464,7 +464,7 @@ fn check_link(link: &str) -> usize {
             || pull != "pull"
             || str::parse::<u32>(number).is_err()
         {
-            println!("wong link: {}", link);
+            println!("wrong link: {}", link);
             return 1;
         }
     }
@@ -521,6 +521,9 @@ impl<'t> Word<'t> {
         } else {
             (s, false)
         };
+        if let Some(text) = text.strip_suffix("`]").and_then(|s| s.strip_prefix("[`")) {
+            return (Word { text, is_code: true, colon }, true, true)
+        }
         let (text, out_code) = if let Some(t) = text.strip_suffix('`') {
             (t, true)
         } else {
@@ -587,7 +590,8 @@ fn format_title(code_words: &HashSet<String>, title: &str) -> String {
             result.push_str(c.as_str());
             first &= word.colon;
         } else {
-            result.push_str(word.text);
+            let text = word.text;
+            result.push_str(if text == "->" { "→" } else { text });
             first &= word.colon;
         }
         // close any opened code span
